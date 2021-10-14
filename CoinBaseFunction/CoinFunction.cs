@@ -16,7 +16,7 @@ namespace CoinBaseFunction
     public static class CoinFunction
     { 
         [FunctionName("CoinFunction")] 
-        public static async Task Run([TimerTrigger("0 * * * * *")] TimerInfo myTimer, ILogger logir)
+        public static async Task Run([TimerTrigger("0 0 * * * *")] TimerInfo myTimer, ILogger logir)
  
         {
             logir.LogInformation($"C# Timer trigger function executed at: {DateTime.Now}");
