@@ -22,11 +22,11 @@ namespace CoinBaseFunction
             logir.LogInformation($"C# Timer trigger function executed at: {DateTime.Now}");
               
             #region INITIAL VARS
- 
-            string ordertype = "";
+  
             decimal size = 0;
             decimal limitPrice = 0m;
             string enviroment; // what  environment are we in prod or Sandbox
+            string productsConfiged; //the products comma seperated i want to buy sell.
             decimal percentageBuySell;// //how much of a swing should i bet on? 
             decimal minimumAccountAvailable;//  //for ALL currencies... 
             Dictionary<string, bool> noExistingBuy = new Dictionary<string, bool>();
@@ -50,10 +50,12 @@ namespace CoinBaseFunction
             enviroment = config.GetValue<string>("Values:Enviroment");
             percentageBuySell = Convert.ToDecimal(config.GetValue<string>("Values:percentageBuySell"));
             minimumAccountAvailable = Convert.ToDecimal(config.GetValue<string>("Values:minimumAccountAvailable"));
+            productsConfiged =  config.GetValue<string>("Values:products");
 #else
             enviroment = System.Environment.GetEnvironmentVariable("Enviroment"); 
             percentageBuySell = Convert.ToDecimal(System.Environment.GetEnvironmentVariable("percentageBuySell"));
             minimumAccountAvailable = Convert.ToDecimal(System.Environment.GetEnvironmentVariable("minimumAccountAvailable"));
+            productsConfiged = System.Environment.GetEnvironmentVariable("products"); 
 #endif
             logir.LogInformation("environment: " + enviroment);
             CoinbaseProClient clientSandbox, clientPro, client;
@@ -79,13 +81,13 @@ namespace CoinBaseFunction
             List<Account> accounts = await client.Accounts.GetAllAccountsAsync();
             var myAccounts = accounts.Where(x => x.Balance != 0).Select(x => new { Currency = x.Currency, Available = x.Available, Balance = x.Balance }).ToList();
             var currencyIHaveAccount = myAccounts.Single(x => x.Currency == currencyIHave);
+            List<string> volitales = productsConfiged.Split(',').ToList();
 #if DEBUG
-            List<string> volitales = new List<string> { "LINK-USD",  "BTC-USD", };
-            decimal howManyTrades = volitales.Count() * 2;//buy and sell options.
+
+            decimal howManyTrades = volitales.Count()+1;//buy options. i figure we keep an equal amount on hand for buy orders(ones we are about to make and ones we are sitting on and will need money to fufill). plus one for wiggle room.
             List<Product> myProducts = products.Where(x => volitales.Contains(x.Id)).ToList();
-#else
-            List<string> volitales = new List<string> { "LINK-USD", "BTC-USD", };
-            decimal howManyTrades = volitales.Count() * 2;//buy and sell options.
+#else 
+            decimal howManyTrades = volitales.Count()+1;//buy options.
             List<Product> myProducts = products.Where(x => volitales.Contains(x.Id)).ToList();
 #endif
             if (myProducts.Count() == 0)
@@ -109,24 +111,18 @@ namespace CoinBaseFunction
                 //---------      CALCULATE WEIGHTED AVERAGE PRICE
                 try
                 {
-                    List<Candle> candles = await client.MarketData.GetHistoricRatesAsync(productToTrade, DateTime.Now.AddDays(-10), DateTime.Now, 86400);// get price every 30 minutes
+                    List<Candle> candles = await client.MarketData.GetHistoricRatesAsync(productToTrade, DateTime.Now.AddDays(-3), DateTime.Now, 86400);// get price every 30 minutes
                     decimal totalVol = 0;
                     List<decimal> weightedPrices = new List<decimal>();
                     foreach (Candle c in candles)
                     {
                         if (!c.Volume.HasValue)
+                            continue; 
+                        else if (c.Open.HasValue && c.Close.HasValue)
+                            weightedPrices.Add((c.Open.Value+ c.Close.Value) * c.Volume.Value  * Convert.ToDecimal(.5) ); 
+                        else
                             continue;
-                        if (!c.High.HasValue || !c.Low.HasValue)
-                        {
-                            if (c.Open.HasValue)
-                                weightedPrices.Add(c.Open.Value * c.Volume.Value);
-                            else if (c.Close.HasValue)
-                                weightedPrices.Add(c.Close.Value * c.Volume.Value);
-                            else
-                                continue;
-                        }
                         totalVol += c.Volume.Value;
-                        weightedPrices.Add((c.High.Value + c.Low.Value) / Convert.ToDecimal(2) * c.Volume.Value);
                     }
                     marketPriceAvg = weightedPrices.Sum() / totalVol;
                 }
@@ -167,19 +163,18 @@ namespace CoinBaseFunction
                 if (currencyIHaveAccount.Available > minimumAccountAvailable
                     && noExistingBuy[productToTrade] == true)
                 {
-                    //BUY logic LINK
-                    ordertype = "Buy"; 
-                     
+                    //BUY logic 
 
                     limitPrice = marketPriceBuy - (marketPriceBuy * percentageBuySell);
                     size = Math.Min(currencyIHaveAccount.Available , howMuchPerTrade) / limitPrice;
                     decimal sizeround = Math.Floor(size / myProduct.BaseIncrement) * myProduct.BaseIncrement;// round down to the base increment.
 
                     decimal limitPriceRound = Math.Floor(limitPrice / myProduct.QuoteIncrement) * myProduct.QuoteIncrement; //round down to the currency increment
+                    string limitPriceRountStr = limitPriceRound.ToString().Substring(0, 7);
                     logir.LogInformation("about to try to buy " + productToTrade + ". I have "+ currencyIHaveAccount.Available 
                         + " available and with howMuchPerTrade of " + howMuchPerTrade + ", I get an amount of " + sizeround + " for this trade, of my currency; " 
                         + currencyIHaveAccount.Currency + ". The avg market price calculated for a buy order is "+ marketPriceBuy 
-                        + ", and the limitPriceRound(the price i want) is "+ limitPriceRound+".");
+                        + ", and the limitPriceRound(the price i want) is "+ limitPriceRountStr + ".");
                      
                     if (sizeround < myProduct.BaseMinSize)
                     {
@@ -188,7 +183,7 @@ namespace CoinBaseFunction
                     }
                     if (marketPriceBuy * percentageBuySell <= limitPriceRound * Convert.ToDecimal(.005))
                     {
-                        logir.LogInformation("cant create the limit buy. not enough profit per unit of" + myProduct.DisplayName + " at " + limitPriceRound +
+                        logir.LogInformation("cant create the limit buy. not enough profit per unit of" + myProduct.DisplayName + " at " + limitPriceRountStr +
                             " times .005 is the fee; " + limitPriceRound * Convert.ToDecimal(.005) + ", and thats larger than marketPrice * percentageBuySell " +
                             marketPriceBuy * percentageBuySell + ". marketPrice: " + marketPriceBuy + ", percentBuySell: " + percentageBuySell);
                         continue;
@@ -201,7 +196,7 @@ namespace CoinBaseFunction
                             var order1 = await client.Orders.PlaceLimitOrderAsync(
                             OrderSide.Buy, productToTrade, size: sizeround, limitPrice: limitPriceRound, timeInForce: TimeInForce.GoodTillCanceled);
                             noExistingBuy[productToTrade] = false;
-                        logir.LogInformation("***BUY ORDER COMPLETE: product:"+ productToTrade+", amount/size: "+ sizeround+", limit price: "+limitPriceRound+". The amount i have per trade is: "+howMuchPerTrade+"***");
+                        logir.LogInformation("***BUY ORDER COMPLETE: product:"+ productToTrade+", amount/size: "+ sizeround+", limit price: "+ limitPriceRountStr + ". The amount i have per trade is: "+howMuchPerTrade+"***");
 
                     }
                     catch (Exception ex)
@@ -221,19 +216,16 @@ namespace CoinBaseFunction
                         && productToTrade.StartsWith(myAccounts[e].Currency) //make sure its the product we are in the market for. 
                         && noExistingSell[productToTrade] == true)
                     {
-                        //SELL logic
-                        ordertype = "Sell";
+                        //SELL logic 
                         limitPrice = marketPriceSell + (marketPriceSell * percentageBuySell);
                         size = myAccounts[e].Available;
                         decimal sizeround = Math.Floor(size / myProduct.BaseIncrement) * myProduct.BaseIncrement;// round to the base increment.
                         decimal limitPriceRound = Math.Floor(limitPrice / myProduct.QuoteIncrement) * myProduct.QuoteIncrement; //round to the currency increment
-                        logir.LogInformation("about to try to sell " + myAccounts[e].Available+" of "+productToTrade);
-                        logir.LogInformation("marketPrice :" + marketPriceSell);
-                        logir.LogInformation("limitPriceRound(the price i want) :" + limitPriceRound);
-
+                        string limitPriceRountStr = limitPriceRound.ToString().Substring(0, 7);
+  
                         logir.LogInformation("about to try to sell " + myAccounts[e].Available + " of " + productToTrade 
                             + ". The avg market price calculated for a sell order is" + marketPriceSell
-                            + ", and the limitPriceRound(the price i want) is " + limitPriceRound + ".");
+                            + ", and the limitPriceRound(the price i want) is " + limitPriceRountStr + ".");
 
                         if (sizeround < myProduct.BaseMinSize)
                         {
@@ -242,7 +234,7 @@ namespace CoinBaseFunction
                         }
                         if (marketPriceSell * percentageBuySell <= limitPriceRound * Convert.ToDecimal(.005))
                         {
-                            logir.LogInformation("cant create the limit sell. not enough profit per unit of" + myProduct.DisplayName + " at " + limitPriceRound +
+                            logir.LogInformation("cant create the limit sell. not enough profit per unit of" + myProduct.DisplayName + " at " + limitPriceRountStr +
                                 " times .005 is the fee; " + limitPriceRound * Convert.ToDecimal(.005) + ", and thats larger than marketPrice * percentageBuySell " +
                                 marketPriceSell * percentageBuySell + ". marketPrice: " + marketPriceSell + ", percentBuySell: " + percentageBuySell);
                             continue;
@@ -255,7 +247,7 @@ namespace CoinBaseFunction
                                 var order1 = await client.Orders.PlaceLimitOrderAsync(
                                 OrderSide.Sell, productToTrade, size: sizeround, limitPrice: limitPriceRound, timeInForce: TimeInForce.GoodTillCanceled);
                                 noExistingSell[productToTrade] = false;
-                                logir.LogInformation("***SELL ORDER COMPLETE: product:" + productToTrade + ", amount/size: " + sizeround + ", limit price: " + limitPriceRound + ". The amount i have of this product is: " + myAccounts[e].Available + "***");
+                                logir.LogInformation("***SELL ORDER COMPLETE: product:" + productToTrade + ", amount/size: " + sizeround + ", limit price: " + limitPriceRountStr + ". The amount i have of this product is: " + myAccounts[e].Available + "***");
 
                         }
                         catch (Exception ex)
